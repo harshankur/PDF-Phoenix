@@ -1,0 +1,122 @@
+{
+  "name": "pdf-phoenix",
+  "displayName": "PDF Phoenix",
+  "description": "PDF viewer and annotator for VS Code. Save highlights and notes into the file, on a self-updating Mozilla pdf.js engine. Allows customizing the default viewer settings.",
+  "version": "1.0.0",
+  "publisher": "pdf-phoenix",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/harshankur/PDF-Phoenix.git"
+  },
+  "bugs": {
+    "url": "https://github.com/harshankur/PDF-Phoenix/issues"
+  },
+  "homepage": "https://github.com/harshankur/PDF-Phoenix#readme",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "pdf",
+    "pdf viewer",
+    "viewer",
+    "pdf editor",
+    "pdf annotator",
+    "annotate",
+    "annotation",
+    "highlight",
+    "pdf.js"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "pdfPhoenix.viewer",
+        "displayName": "PDF Phoenix Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.pdf"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "pdfPhoenix.pdfjs.checkForUpdate",
+        "title": "Check for pdf.js Updates",
+        "category": "PDF Phoenix"
+      },
+      {
+        "command": "pdfPhoenix.pdfjs.selectVersion",
+        "title": "Choose pdf.js Version…",
+        "category": "PDF Phoenix"
+      },
+      {
+        "command": "pdfPhoenix.pdfjs.resetToBundled",
+        "title": "Use Built-in pdf.js Version",
+        "category": "PDF Phoenix"
+      }
+    ],
+    "configuration": {
+      "title": "PDF Phoenix",
+      "properties": {
+        "pdfPhoenix.defaultZoom": {
+          "type": "string",
+          "default": "page-fit",
+          "enum": [
+            "auto",
+            "page-fit",
+            "page-width",
+            "page-actual"
+          ],
+          "enumDescriptions": [
+            "Automatic zoom (pdf.js chooses)",
+            "Fit the whole page in the view",
+            "Fit the page width to the view",
+            "Show the page at its actual size (100%)"
+          ],
+          "markdownDescription": "Zoom level a PDF opens at. Applies to PDFs you open after changing this."
+        },
+        "pdfPhoenix.defaultSidebar": {
+          "type": "string",
+          "default": "outline",
+          "enum": [
+            "none",
+            "thumbnails",
+            "outline"
+          ],
+          "enumDescriptions": [
+            "Start with the sidebar closed",
+            "Start with the page thumbnails panel open",
+            "Start with the document outline (bookmarks) panel open, falling back to thumbnails when the PDF has no outline"
+          ],
+          "markdownDescription": "Which sidebar panel a PDF opens with. Applies to PDFs you open after changing this."
+        },
+        "pdfPhoenix.pdfjs.autoCheckForUpdates": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Check about once a day for a newer pdf.js release within the current major version, and ask before downloading it. Major-version upgrades are never installed automatically; use the \"PDF Phoenix: Choose pdf.js Version…\" command for those."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "fetch-assets": "node scripts/fetch-pdfjs.mjs",
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "vscode:prepublish": "npm run fetch-assets && npm run compile",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "extract-zip": "^2.0.1",
+    "@vscode/vsce": "^3.0.0"
+  }
+}

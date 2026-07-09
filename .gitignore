@@ -1,0 +1,7 @@
+out/
+node_modules/
+media/pdfjs/
+*.vsix
+*.tgz
+.vscode-test/
+.DS_Store
