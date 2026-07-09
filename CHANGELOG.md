@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+
+- Add an extension icon.
+
 ## 1.0.0
 
 - View `.pdf` files in VS Code using Mozilla's full pdf.js viewer (bundled v6.1.200): toolbar, page navigation, text search, thumbnails and document outline, zoom, rotate, and print.

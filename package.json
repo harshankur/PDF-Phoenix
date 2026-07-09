@@ -2,8 +2,9 @@
   "name": "pdf-phoenix",
   "displayName": "PDF Phoenix",
   "description": "PDF viewer and annotator for VS Code. Save highlights and notes into the file, on a self-updating Mozilla pdf.js engine. Allows customizing the default viewer settings.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "harshankur",
+  "icon": "media/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/harshankur/PDF-Phoenix.git"
