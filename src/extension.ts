@@ -40,9 +40,22 @@ interface PendingByteRequest {
   resolve: (bytes: Uint8Array) => void;
   reject: (err: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
+  docKey: string;
 }
 
 const BYTE_REQUEST_TIMEOUT_MS = 10_000;
+
+// How long after our own write to trust that a resulting file-watcher event is
+// an echo of that write rather than a genuine external change. A time window
+// (rather than a one-shot flag consumed by the next event) is self-healing: it
+// can't get permanently stuck if the write itself fails before any watcher
+// event arrives, and it still absorbs a filesystem that fires the watcher
+// more than once for a single write.
+const OWN_WRITE_SUPPRESS_MS = 1_000;
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 class PdfViewerProvider implements vscode.CustomEditorProvider<vscode.CustomDocument> {
   // CustomDocumentContentChangeEvent (not CustomDocumentEditEvent): the dirty
@@ -61,7 +74,7 @@ class PdfViewerProvider implements vscode.CustomEditorProvider<vscode.CustomDocu
 
   private readonly panels = new Map<string, vscode.WebviewPanel>();
   private readonly pendingByteRequests = new Map<string, PendingByteRequest>();
-  private readonly suppressNextChange = new Set<string>();
+  private readonly ownWriteAt = new Map<string, number>();
   private nextRequestId = 0;
 
   constructor(
@@ -88,12 +101,18 @@ class PdfViewerProvider implements vscode.CustomEditorProvider<vscode.CustomDocu
     panel.webview.onDidReceiveMessage(async (message) => {
       switch (message?.type) {
         case "pdfphoenix-ready": {
-          const bytes = await vscode.workspace.fs.readFile(document.uri);
-          panel.webview.postMessage({
-            type: "pdfphoenix-load",
-            data: Buffer.from(bytes).toString("base64"),
-            filename: path.basename(document.uri.fsPath),
-          });
+          try {
+            const bytes = await vscode.workspace.fs.readFile(document.uri);
+            panel.webview.postMessage({
+              type: "pdfphoenix-load",
+              data: Buffer.from(bytes).toString("base64"),
+              filename: path.basename(document.uri.fsPath),
+            });
+          } catch (err) {
+            await vscode.window.showErrorMessage(
+              `PDF Phoenix could not open ${path.basename(document.uri.fsPath)}: ${messageOf(err)}`
+            );
+          }
           break;
         }
         case "pdfphoenix-dirty": {
@@ -106,6 +125,15 @@ class PdfViewerProvider implements vscode.CustomEditorProvider<vscode.CustomDocu
             clearTimeout(pending.timeout);
             this.pendingByteRequests.delete(message.requestId);
             pending.resolve(Buffer.from(message.data, "base64"));
+          }
+          break;
+        }
+        case "pdfphoenix-bytes-error": {
+          const pending = this.pendingByteRequests.get(message.requestId);
+          if (pending) {
+            clearTimeout(pending.timeout);
+            this.pendingByteRequests.delete(message.requestId);
+            pending.reject(new Error(`PDF Phoenix: ${message.message}`));
           }
           break;
         }
@@ -127,22 +155,34 @@ class PdfViewerProvider implements vscode.CustomEditorProvider<vscode.CustomDocu
       // trigger a full webview reload right as (or just after) it replies
       // to a pending byte request, racing the save/backup/dirty-tracking
       // machinery. The webview already has the bytes it just reported.
-      if (this.suppressNextChange.delete(key)) {
+      const writtenAt = this.ownWriteAt.get(key);
+      if (writtenAt !== undefined && Date.now() - writtenAt < OWN_WRITE_SUPPRESS_MS) {
         return;
       }
-      render();
+      render().catch(async (err) => {
+        await vscode.window.showErrorMessage(
+          `PDF Phoenix could not reload ${path.basename(document.uri.fsPath)}: ${messageOf(err)}`
+        );
+      });
     });
     panel.onDidDispose(() => {
       watcher.dispose();
       if (this.panels.get(key) === panel) {
         this.panels.delete(key);
       }
+      for (const [requestId, pending] of this.pendingByteRequests) {
+        if (pending.docKey === key) {
+          clearTimeout(pending.timeout);
+          this.pendingByteRequests.delete(requestId);
+          pending.reject(new Error("PDF Phoenix: the PDF editor was closed before it could respond."));
+        }
+      }
     });
   }
 
   async saveCustomDocument(document: vscode.CustomDocument): Promise<void> {
     const bytes = await this.requestBytes(document);
-    this.suppressNextChange.add(document.uri.toString());
+    this.ownWriteAt.set(document.uri.toString(), Date.now());
     await vscode.workspace.fs.writeFile(document.uri, bytes);
   }
 
@@ -192,13 +232,14 @@ class PdfViewerProvider implements vscode.CustomEditorProvider<vscode.CustomDocu
     if (!panel) {
       return Promise.reject(new Error("PDF Phoenix: no open editor to read changes from."));
     }
+    const docKey = document.uri.toString();
     const requestId = String(this.nextRequestId++);
     const promise = new Promise<Uint8Array>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingByteRequests.delete(requestId);
         reject(new Error("PDF Phoenix: timed out waiting for the PDF viewer to respond."));
       }, BYTE_REQUEST_TIMEOUT_MS);
-      this.pendingByteRequests.set(requestId, { resolve, reject, timeout });
+      this.pendingByteRequests.set(requestId, { resolve, reject, timeout, docKey });
     });
     panel.webview.postMessage({ type: "pdfphoenix-get-bytes", requestId });
     return promise;

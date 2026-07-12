@@ -1,15 +1,20 @@
 # PDF Phoenix
 
-View **and annotate** PDF files right inside VS Code, and actually save your annotations back into the file. Powered by Mozilla's [pdf.js](https://github.com/mozilla/pdf.js), with a viewer engine that keeps itself up to date.
+View **and annotate** PDF files right inside VS Code, and actually save your annotations back into the file. Powered by Mozilla's [pdf.js](https://github.com/mozilla/pdf.js), with a viewer engine that keeps itself up to date — so you're relying on pdf.js's own security track record, not on how often this extension gets updated.
 
 Open any `.pdf` and it renders in pdf.js's full viewer: toolbar, page navigation, text search, thumbnails and document outline, zoom, rotate, and print.
+
+## Security: pdf.js updates itself, independently of this extension
+
+Most VS Code PDF extensions bundle a fixed pdf.js build. When Mozilla ships a security fix, you're stuck waiting on that extension's author to notice, bump the dependency, and publish a new release — which can take weeks, or never happen.
+
+PDF Phoenix's pdf.js engine doesn't wait on that. About once a day it checks Mozilla's releases on its own and offers to update within the current major version; you can also jump to any specific release, or roll back, from the Command Palette at any time. That means you're relying on the security track record of pdf.js itself — one of the most widely used, heavily scrutinized PDF renderers in the world — not on how often PDF Phoenix happens to get republished. Full details in [Keeping the PDF engine up to date](#keeping-the-pdf-engine-up-to-date).
 
 ## Why PDF Phoenix
 
 Most PDF extensions for VS Code are view-only wrappers around a fixed pdf.js build. PDF Phoenix adds the things they don't:
 
 - **Annotations that save.** Highlight text, add text notes, draw, and add images or stamps, then press `Ctrl/Cmd+S` and the changes are written straight back into the PDF file. The editor tab shows the usual unsaved-changes dot, and `File: Revert File` discards edits. (This is real saving into the document, not a separate sidecar file.)
-- **A self-updating PDF engine.** PDF Phoenix can pull the latest Mozilla pdf.js on its own, with your permission, so you get new rendering fixes and features **without waiting for this extension to be updated**. A known-good version is always bundled as a fallback, and you can pin, switch, or roll back the engine version yourself.
 - **Your VS Code shortcuts stay yours.** pdf.js normally grabs `Ctrl/Cmd+P` and `Ctrl/Cmd+Shift+P` to print, popping a "Preparing to print" overlay over Quick Open and the Command Palette. PDF Phoenix stops that, so both shortcuts behave exactly as they do everywhere else in VS Code. Printing is still one click away on the viewer toolbar.
 - **Opens the way you want.** Out of the box, a document opens at Page Fit zoom with the outline (bookmarks) sidebar showing, instead of leaving you to zoom and open panels first. Both are configurable (see [Settings](#settings)).
 
@@ -29,7 +34,7 @@ Undo and redo work inside the viewer with `Ctrl/Cmd+Z` and `Ctrl/Cmd+Y`. To thro
 
 ## Keeping the PDF engine up to date
 
-PDF Phoenix always ships with a bundled, tested version of pdf.js. On top of that, it can use a newer one you download at runtime:
+PDF Phoenix always ships with a bundled, tested version of pdf.js. On top of that, it can use a newer one you download at runtime — so a pdf.js security fix reaches you as soon as Mozilla ships it, not whenever PDF Phoenix next gets published:
 
 - **Automatic checks.** About once a day, PDF Phoenix checks Mozilla's releases for a newer version *within the same major version* and asks before downloading. It never jumps to a new major version on its own, because a major release could change internals that annotation-saving and the shortcut handling rely on. Turn this off with the `pdfPhoenix.pdfjs.autoCheckForUpdates` setting.
 - **Commands** (open the Command Palette and type "PDF Phoenix"):
@@ -51,7 +56,7 @@ Zoom and sidebar changes take effect on PDFs you open after changing them.
 
 ## Requirements
 
-VS Code `1.90.0` or newer.
+VS Code `1.48.0` or newer (the Custom Editor API this extension relies on stabilized in `1.46`; `1.48` is used as a small safety margin).
 
 ---
 

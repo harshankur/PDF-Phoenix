@@ -50,7 +50,12 @@ const PATCHES = [
 const META_FILENAME = "pdf-phoenix-meta.json";
 
 async function main() {
-  if (!existsSync(viewerMarker)) {
+  const cachedVersion = await readCachedVersion();
+  if (!existsSync(viewerMarker) || cachedVersion !== VERSION) {
+    // Wipe rather than extract-over: bumping VERSION locally without
+    // deleting media/pdfjs/ first would otherwise leave the old release's
+    // files mixed in and still label the directory with the new version.
+    await rm(mediaDir, { recursive: true, force: true });
     await mkdir(mediaDir, { recursive: true });
 
     const tmpDir = mktempSafe();
@@ -78,7 +83,7 @@ async function main() {
       );
     }
   } else {
-    console.log(`pdf.js viewer already present at ${mediaDir}, skipping download.`);
+    console.log(`pdf.js ${VERSION} viewer already present at ${mediaDir}, skipping download.`);
   }
 
   for (const { file, from, to } of PATCHES) {
@@ -105,6 +110,15 @@ async function main() {
 
 function mktempSafe() {
   return mkdtempSync(path.join(tmpdir(), "pdf-phoenix-pdfjs-"));
+}
+
+async function readCachedVersion() {
+  try {
+    const raw = await readFile(path.join(mediaDir, META_FILENAME), "utf8");
+    return JSON.parse(raw).version ?? null;
+  } catch {
+    return null;
+  }
 }
 
 main().catch((err) => {

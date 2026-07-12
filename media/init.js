@@ -52,10 +52,20 @@
   // reference-only false positives, and - unlike the callbacks - it's
   // simply read fresh every tick regardless of what pdf.js's internal flag
   // is doing.
+  // tryOpen() runs again on every revert (extension.ts posts a fresh
+  // "pdfphoenix-load" into the same still-open webview rather than reloading
+  // the page), which would otherwise chain into a second watchForEdits() call
+  // and leak the previous poll interval. Tracking it here lets each call
+  // clear its predecessor first.
+  var editWatchInterval = null;
+
   function watchForEdits() {
     var app = window.PDFViewerApplication;
+    if (editWatchInterval !== null) {
+      clearInterval(editWatchInterval);
+    }
     var lastHash = app.pdfDocument.annotationStorage.serializable.hash;
-    setInterval(function () {
+    editWatchInterval = setInterval(function () {
       var storage = app.pdfDocument && app.pdfDocument.annotationStorage;
       if (!storage) {
         return;
@@ -68,12 +78,25 @@
     }, 200);
   }
 
+  // Tracks the in-progress app.open() so replyWithBytes() can wait for it
+  // instead of assuming app.pdfDocument is already set. A save/backup
+  // request landing in the brief window right after opening a PDF (before
+  // app.open() resolves) would otherwise throw synchronously on
+  // app.pdfDocument being undefined, leaving the extension host's request
+  // hanging until its timeout instead of failing fast or succeeding.
+  var documentReadyPromise = null;
+
   function tryOpen(bytes, filename) {
     var app = window.PDFViewerApplication;
     if (app && app.initializedPromise) {
-      app.initializedPromise.then(function () {
-        return app.open({ data: bytes, filename: filename });
-      }).then(watchForEdits);
+      documentReadyPromise = app.initializedPromise
+        .then(function () {
+          return app.open({ data: bytes, filename: filename });
+        })
+        .then(function () {
+          watchForEdits();
+          return app;
+        });
     } else {
       setTimeout(function () {
         tryOpen(bytes, filename);
@@ -82,14 +105,27 @@
   }
 
   function replyWithBytes(requestId) {
-    var app = window.PDFViewerApplication;
-    Promise.resolve(app.pdfDocument.saveDocument()).then(function (bytes) {
-      vscodeApi.postMessage({
-        type: "pdfphoenix-bytes",
-        requestId: requestId,
-        data: bytesToBase64(bytes),
+    Promise.resolve(documentReadyPromise)
+      .then(function (app) {
+        if (!app || !app.pdfDocument) {
+          throw new Error("the PDF viewer has not finished loading yet");
+        }
+        return app.pdfDocument.saveDocument();
+      })
+      .then(function (bytes) {
+        vscodeApi.postMessage({
+          type: "pdfphoenix-bytes",
+          requestId: requestId,
+          data: bytesToBase64(bytes),
+        });
+      })
+      .catch(function (err) {
+        vscodeApi.postMessage({
+          type: "pdfphoenix-bytes-error",
+          requestId: requestId,
+          message: err && err.message ? err.message : String(err),
+        });
       });
-    });
   }
 
   window.addEventListener("message", function (event) {

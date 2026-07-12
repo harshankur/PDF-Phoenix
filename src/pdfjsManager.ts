@@ -87,39 +87,70 @@ export class PdfjsManager {
 
   // ---------- install / reset ----------
 
+  // Only one install at a time: the staging dir below is a fixed, shared
+  // path, so two concurrent installs (e.g. a double command-palette
+  // invocation racing the startup auto-check prompt) would otherwise unzip
+  // two different versions into the same directory and swap in whatever
+  // interleaved mix happened to land.
+  private installing = false;
+
   // Download + extract into a staging dir, validate/prune/patch, then atomically
   // swap it into place. The live copy isn't touched until the very last rename,
   // so a failed or invalid download leaves the current viewer intact.
   async install(version: string): Promise<void> {
-    await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: `PDF Phoenix: installing pdf.js v${version}`,
-        cancellable: false,
-      },
-      async (progress) => {
-        const storageRoot = this.context.globalStorageUri.fsPath;
-        const staging = path.join(storageRoot, "staging");
-        const target = this.downloadedDir.fsPath;
+    if (this.installing) {
+      throw new Error("PDF Phoenix is already installing a pdf.js version. Try again once it finishes.");
+    }
+    this.installing = true;
+    try {
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `PDF Phoenix: installing pdf.js v${version}`,
+          cancellable: false,
+        },
+        async (progress) => {
+          const storageRoot = this.context.globalStorageUri.fsPath;
+          const staging = path.join(storageRoot, "staging");
+          const backup = path.join(storageRoot, "pdfjs-previous");
+          const target = this.downloadedDir.fsPath;
 
-        await fs.mkdir(storageRoot, { recursive: true });
-        await fs.rm(staging, { recursive: true, force: true });
-        await fs.mkdir(staging, { recursive: true });
+          await fs.mkdir(storageRoot, { recursive: true });
+          await fs.rm(staging, { recursive: true, force: true });
+          await fs.mkdir(staging, { recursive: true });
 
-        progress.report({ message: "downloading…" });
-        const zip = await this.downloadZip(version);
+          progress.report({ message: "downloading…" });
+          const zip = await this.downloadZip(version);
 
-        progress.report({ message: "extracting…" });
-        await unzipToDir(zip, staging);
+          progress.report({ message: "extracting…" });
+          await unzipToDir(zip, staging);
 
-        progress.report({ message: "validating…" });
-        await preparePdfjsDir(staging);
-        await writeMeta(staging, version);
+          progress.report({ message: "validating…" });
+          await preparePdfjsDir(staging);
+          await writeMeta(staging, version);
 
-        await fs.rm(target, { recursive: true, force: true });
-        await fs.rename(staging, target);
-      }
-    );
+          // Move the current copy aside rather than deleting it outright, so a
+          // failed final rename leaves the working copy recoverable instead of
+          // silently falling back to the bundled fallback.
+          await fs.rm(backup, { recursive: true, force: true });
+          if (await pathExists(target)) {
+            await fs.rename(target, backup);
+          }
+          try {
+            await fs.rename(staging, target);
+          } catch (err) {
+            if (await pathExists(backup)) {
+              await fs.rm(target, { recursive: true, force: true });
+              await fs.rename(backup, target);
+            }
+            throw err;
+          }
+          await fs.rm(backup, { recursive: true, force: true });
+        }
+      );
+    } finally {
+      this.installing = false;
+    }
   }
 
   async resetToBundled(): Promise<void> {
@@ -305,4 +336,13 @@ export class PdfjsManager {
 
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
 }

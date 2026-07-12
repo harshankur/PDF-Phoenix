@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.2
+
+- Lower the declared minimum VS Code version from `1.90.0` to `1.48.0`, matching the actual API surface used (the Custom Editor API, stabilized in `1.46`) instead of an unverified scaffold default.
+- Fix: a failed save could permanently disable file-change detection for that document, silently ignoring later external edits. Reworked as a self-clearing time window instead of a one-shot flag.
+- Fix: reverting a document repeatedly leaked one edit-tracking timer per revert, left running for the life of the webview.
+- Fix: saving or backing up a PDF in the brief window right before the viewer finished loading could throw inside the webview and stall for the full 10s timeout instead of failing fast; the webview now reports the error back immediately.
+- Fix: starting a pdf.js version install while one was already running could interleave two versions' files into the same staging directory.
+- Fix: a failed pdf.js install swap could leave no engine installed at all instead of preserving the previously installed version.
+- Fix: pending save/backup requests are now cancelled immediately when their PDF tab is closed, instead of hanging until the timeout.
+- Fix: `npm run fetch-assets` could silently keep a stale bundled pdf.js copy after bumping the version locally without clearing `media/pdfjs/` first.
+
 ## 1.0.1
 
 - Add an extension icon.
