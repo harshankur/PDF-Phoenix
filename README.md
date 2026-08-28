@@ -56,7 +56,7 @@ Zoom and sidebar changes take effect on PDFs you open after changing them.
 
 ## Requirements
 
-VS Code `1.48.0` or newer (the Custom Editor API this extension relies on stabilized in `1.46`; `1.48` is used as a small safety margin).
+VS Code `1.49.0` or newer (the Custom Editor API this extension relies on stabilized in `1.46`; `1.49` is the floor for `Webview.cspSource`, used to build the viewer's Content-Security-Policy).
 
 ---
 

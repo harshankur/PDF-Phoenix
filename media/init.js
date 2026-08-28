@@ -11,6 +11,15 @@
   var SIDEBAR_VIEW = { none: 0, thumbnails: 1, outline: 2 };
   var ALLOWED_ZOOM = { auto: 1, "page-fit": 1, "page-width": 1, "page-actual": 1 };
 
+  // Copy a webview-URI value from the script tag's data-* attribute into the
+  // matching pdf.js AppOption. Absent/empty attributes leave the default alone.
+  function setAssetOption(options, optionName, attribute) {
+    var value = settingsEl ? settingsEl.getAttribute(attribute) : null;
+    if (value) {
+      options.set(optionName, value);
+    }
+  }
+
   function base64ToBytes(base64) {
     var binary = atob(base64);
     var bytes = new Uint8Array(binary.length);
@@ -157,6 +166,21 @@
         "sidebarViewOnLoad",
         sidebar in SIDEBAR_VIEW ? SIDEBAR_VIEW[sidebar] : SIDEBAR_VIEW.outline
       );
+      // Point pdf.js at its own side-assets via the webview URIs the extension
+      // host computed. pdf.js's built-in defaults for these are relative
+      // ("../web/cmaps/", "../web/wasm/", etc.) and resolve against the webview
+      // shell's document origin, not the resource host where the files actually
+      // live - so they 404 the moment a PDF needs them: cMaps for CJK text,
+      // standard font data for non-embedded base-14 fonts, the wasm decoders
+      // for JPEG2000/JBIG2 images and ICC-based colour, and the sandbox for
+      // embedded JavaScript. Only pdf.mjs/viewer.mjs/viewer.css/locale get
+      // rewritten in the HTML; everything else has to be threaded through here.
+      // Missing an attribute leaves pdf.js's own default untouched.
+      setAssetOption(options, "cMapUrl", "data-pdfphoenix-cmap-url");
+      setAssetOption(options, "standardFontDataUrl", "data-pdfphoenix-standard-fonts-url");
+      setAssetOption(options, "wasmUrl", "data-pdfphoenix-wasm-url");
+      setAssetOption(options, "iccUrl", "data-pdfphoenix-icc-url");
+      setAssetOption(options, "sandboxBundleSrc", "data-pdfphoenix-sandbox-src");
       // pdf.js's own Ctrl+S/download button write to a browser-downloaded
       // file, which in a VS Code webview surfaces as a native OS save
       // dialog. Saving is handled entirely by VS Code's own Ctrl+S (which

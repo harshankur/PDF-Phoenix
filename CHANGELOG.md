@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.3
+
+- Fix: PDFs failed to render on any downloaded pdf.js engine (every version chosen through "Check for Updates" or "Choose Version…"), showing a blank editor. pdf.js's `viewer.html` ships its own Content-Security-Policy locked to `script-src 'self'` / `style-src 'self'`; inlined unchanged into a webview, that `'self'` matches the shell document's origin rather than the resource host serving the files, so every script and stylesheet was blocked. The bundled engine (served from the extension directory) happened to slip through, but a downloaded engine lives on a different resource host in global storage and was blocked outright. The policy is now rebuilt from `webview.cspSource` so scripts and styles load from either host.
+- Fix: pdf.js's runtime side-assets (cMaps for CJK text, standard font data for non-embedded base-14 fonts, the WASM decoders for JPEG2000/JBIG2 images and ICC-based colour, and the scripting sandbox) resolved against the webview shell origin and 404'd whenever a PDF needed them. They are now pointed at the correct webview URIs, matching how `pdf.mjs`/`viewer.mjs`/`viewer.css` were already handled.
+- Raise the declared minimum VS Code version from `1.48.0` to `1.49.0`, matching `Webview.cspSource` (added in `1.49`).
+
 ## 1.0.2
 
 - Lower the declared minimum VS Code version from `1.90.0` to `1.48.0`, matching the actual API surface used (the Custom Editor API, stabilized in `1.46`) instead of an unverified scaffold default.

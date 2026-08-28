@@ -57,6 +57,14 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// A webview URI for a directory, with a trailing slash preserved. pdf.js builds
+// each asset URL by concatenating a filename onto the configured base (e.g.
+// cMapUrl + "78-EUC-H.bcmap"), so the base must end in "/". asWebviewUri drops
+// any trailing slash from the input path, so it's re-appended here.
+function dirUri(webview: vscode.Webview, parent: vscode.Uri, name: string): string {
+  return `${webview.asWebviewUri(vscode.Uri.joinPath(parent, name))}/`;
+}
+
 class PdfViewerProvider implements vscode.CustomEditorProvider<vscode.CustomDocument> {
   // CustomDocumentContentChangeEvent (not CustomDocumentEditEvent): the dirty
   // indicator only clears via an explicit save or revert, never on its own
@@ -284,6 +292,49 @@ class PdfViewerProvider implements vscode.CustomEditorProvider<vscode.CustomDocu
     const viewerMjsUri = webview.asWebviewUri(vscode.Uri.joinPath(webDir, "viewer.mjs"));
     const localeJsonUri = webview.asWebviewUri(vscode.Uri.joinPath(webDir, "locale", "locale.json"));
 
+    // pdf.js resolves its side-assets from AppOptions URLs that default to paths
+    // relative to the viewer ("../web/cmaps/", "../web/wasm/", …). In a webview
+    // those resolve against the shell document's origin rather than the resource
+    // host, so they 404 whenever a PDF actually needs them. Hand pdf.js the real
+    // webview URIs instead (init.js applies these before the document opens).
+    // The directory URLs keep a trailing slash because pdf.js concatenates the
+    // asset filename straight onto them.
+    const cMapUri = dirUri(webview, webDir, "cmaps");
+    const standardFontsUri = dirUri(webview, webDir, "standard_fonts");
+    const wasmUri = dirUri(webview, webDir, "wasm");
+    const iccUri = dirUri(webview, webDir, "iccs");
+    const sandboxUri = webview.asWebviewUri(vscode.Uri.joinPath(buildDir, "pdf.sandbox.mjs"));
+
+    // pdf.js's viewer.html carries its own Content-Security-Policy meta tag with
+    // script-src/style-src locked to 'self'. In a webview 'self' is the shell
+    // document's origin, not the resource host that actually serves our files -
+    // so that policy blocks every script and stylesheet the extension points at
+    // (pdf.mjs, viewer.mjs, viewer.css, init.js, overrides.css) and nothing
+    // renders. The webview can serve resources from more than one host (the
+    // extension dir and global storage live on different vscode-resource
+    // authorities), and webview.cspSource expands to exactly that set, so the
+    // policy has to be rebuilt around it rather than left at 'self'. Everything
+    // pdf.js loads at runtime - cMaps, fonts, the wasm decoders, ICC profiles,
+    // the scripting sandbox - is a webview URI too, hence cspSource across the
+    // fetch/worker/img/font directives as well.
+    const csp =
+      `default-src 'none'; ` +
+      `script-src ${webview.cspSource} 'wasm-unsafe-eval'; ` +
+      `worker-src ${webview.cspSource} blob:; ` +
+      `style-src ${webview.cspSource}; ` +
+      `img-src ${webview.cspSource} blob: data:; ` +
+      `media-src blob:; ` +
+      `font-src ${webview.cspSource} data:; ` +
+      `connect-src ${webview.cspSource} blob: data:; ` +
+      `base-uri 'none'; form-action 'none';`;
+    const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${csp}" />`;
+    const cspTagPattern = /<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/i;
+    // Swap pdf.js's own policy for ours; if a future pdf.js ever ships without
+    // one, inject ours into <head> rather than leave the webview policy-less.
+    html = cspTagPattern.test(html)
+      ? html.replace(cspTagPattern, cspMeta)
+      : html.replace(/<head>/i, `<head>\n    ${cspMeta}`);
+
     const { zoom, sidebar } = this.readViewerDefaults();
 
     html = html
@@ -295,7 +346,10 @@ class PdfViewerProvider implements vscode.CustomEditorProvider<vscode.CustomDocu
       )
       .replace(
         '<script src="viewer.mjs" type="module"></script>',
-        `<script src="${initJsUri}" data-pdfphoenix-zoom="${zoom}" data-pdfphoenix-sidebar="${sidebar}"></script>\n  <script src="${viewerMjsUri}" type="module"></script>`
+        `<script src="${initJsUri}" data-pdfphoenix-zoom="${zoom}" data-pdfphoenix-sidebar="${sidebar}"` +
+          ` data-pdfphoenix-cmap-url="${cMapUri}" data-pdfphoenix-standard-fonts-url="${standardFontsUri}"` +
+          ` data-pdfphoenix-wasm-url="${wasmUri}" data-pdfphoenix-icc-url="${iccUri}"` +
+          ` data-pdfphoenix-sandbox-src="${sandboxUri}"></script>\n  <script src="${viewerMjsUri}" type="module"></script>`
       );
 
     return html;
