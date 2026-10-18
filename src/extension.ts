@@ -37,6 +37,10 @@ export interface PdfPhoenixTestApi {
   setSaveDelay(ms: number): void;
   // How long superseded pdf.js folders are kept (0: as soon as unused).
   setEngineRetention(ms: number): void;
+  // Where downloaded pdf.js copies live (global storage).
+  engineStorage(): string;
+  // The startup step that retires a download the built-in pdf.js superseded.
+  retireSupersededEngine(): Promise<void>;
   // Each openCustomDocument call: "uri <- backupId" or "uri <- disk".
   openLog(): string[];
   // The bytes the viewer would save for this PDF (what a backup contains).
@@ -182,8 +186,21 @@ export function activate(context: vscode.ExtensionContext): PdfPhoenixTestApi | 
     manager.onDidChangeEngine(() => provider.rebuildAll())
   );
 
-  // Pick up engine switches made in other windows.
-  void manager.startWatching().then((watcher) => context.subscriptions.push(watcher));
+  // After an extension update, a download no newer than the new built-in
+  // pdf.js is retired (unless pdfPhoenix.pdfjs.keepDownloadedVersion). Then
+  // pick up engine switches made in other windows.
+  void manager
+    .retireSupersededDownload()
+    .catch((err) => console.error("PDF Phoenix could not retire a superseded pdf.js:", err))
+    .then(() => manager.startWatching())
+    .then((watcher) => context.subscriptions.push(watcher));
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("pdfPhoenix.pdfjs.keepDownloadedVersion")) {
+        void manager.onKeepDownloadedVersionChanged();
+      }
+    })
+  );
 
   if (testMode) {
     return provider.testApi();
@@ -386,6 +403,8 @@ class PdfViewerProvider implements vscode.CustomEditorProvider<vscode.CustomDocu
       engineRoot: (uri) => this.engineRoots.get(uri.toString()),
       installEngineCopy: (version, options) => this.pdfjs.installBundledCopyForTests(version, options),
       setEngineRetention: (ms) => this.pdfjs.setRetentionForTests(ms),
+      engineStorage: () => this.pdfjs.storagePath,
+      retireSupersededEngine: () => this.pdfjs.retireSupersededDownload(),
       setSaveDelay: (ms) => {
         this.saveDelayForTests = ms;
       },

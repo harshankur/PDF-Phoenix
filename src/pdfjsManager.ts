@@ -7,6 +7,7 @@ import {
   Release,
   ReleaseAsset,
   checkDownload,
+  builtInSupersedes,
   compareVersions,
   findDistAsset,
   majorChangeWarning,
@@ -47,6 +48,9 @@ export class PdfjsManager {
   readonly onDidChangeEngine = this.engineChanged.event;
 
   private retentionMs = DEFAULT_RETENTION_MS;
+  // Changes to the retired list run one at a time: a cleanup and a switch
+  // overlapping would otherwise each write their own copy, losing an entry.
+  private retiredQueue: Promise<unknown> = Promise.resolve();
   private lastActiveRoot: string | undefined;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
@@ -55,13 +59,17 @@ export class PdfjsManager {
     return this.context.globalStorageUri.fsPath;
   }
 
+  get storagePath(): string {
+    return this.storageRoot;
+  }
+
   private get bundledDir(): vscode.Uri {
     return vscode.Uri.joinPath(this.context.extensionUri, "media", "pdfjs");
   }
 
-  // The folder of the active downloaded engine, or null for the built-in
-  // one. No pointer yet means the 1.0.x layout, if that copy exists.
-  private async activeDownloadDir(): Promise<string | null> {
+  // The downloaded engine the pointer names, if it's a usable one. No
+  // pointer yet means the 1.0.x layout, if that copy exists.
+  private async pointedDownload(): Promise<string | null> {
     let pointer: { dir?: unknown } | null = null;
     try {
       pointer = JSON.parse(await fs.readFile(path.join(this.storageRoot, POINTER_FILE), "utf8"));
@@ -75,6 +83,39 @@ export class PdfjsManager {
           ? path.join(this.storageRoot, ENGINES_DIR, pointer.dir)
           : null;
     return candidate && (await isValidEngine(candidate)) ? candidate : null;
+  }
+
+  // The folder of the active downloaded engine, or null for the built-in
+  // one: also when an extension update brought a built-in copy at least as
+  // new, unless pdfPhoenix.pdfjs.keepDownloadedVersion is on.
+  private async activeDownloadDir(): Promise<string | null> {
+    const pointed = await this.pointedDownload();
+    if (!pointed) {
+      return null;
+    }
+    const superseded = builtInSupersedes(
+      await readMetaVersion(pointed),
+      await readMetaVersion(this.bundledDir.fsPath),
+      keepDownloadedVersion()
+    );
+    return superseded ? null : pointed;
+  }
+
+  // Point back at the built-in engine when it has superseded the download,
+  // so the download's folder is retired and later removed.
+  async retireSupersededDownload(): Promise<void> {
+    if ((await this.pointedDownload()) && !(await this.activeDownloadDir())) {
+      await this.activate(null);
+    }
+  }
+
+  // pdfPhoenix.pdfjs.keepDownloadedVersion changed: open viewers move to the
+  // engine now in effect, and turning it off retires a superseded download.
+  async onKeepDownloadedVersionChanged(): Promise<void> {
+    if (!keepDownloadedVersion()) {
+      await this.retireSupersededDownload();
+    }
+    await this.noticeEngineChange();
   }
 
   // The pdf.js root the webview should load from: the active downloaded copy
@@ -136,6 +177,12 @@ export class PdfjsManager {
     }
   }
 
+  private updateRetired<T>(change: () => Promise<T>): Promise<T> {
+    const run = this.retiredQueue.then(change);
+    this.retiredQueue = run.catch(() => undefined);
+    return run;
+  }
+
   private async readRetired(): Promise<Record<string, number>> {
     try {
       const parsed = JSON.parse(await fs.readFile(path.join(this.storageRoot, RETIRED_FILE), "utf8"));
@@ -146,21 +193,23 @@ export class PdfjsManager {
   }
 
   private async writeJsonAtomically(file: string, value: unknown): Promise<void> {
-    const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    const temp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     await fs.writeFile(temp, JSON.stringify(value), "utf8");
     await fs.rename(temp, file);
   }
 
   // Point at a different engine (a folder under engines/, or null for the
-  // built-in one), retiring the previously active download.
+  // built-in one), retiring the previously named download.
   private async activate(dirName: string | null): Promise<void> {
     await fs.mkdir(this.storageRoot, { recursive: true });
-    const previous = await this.activeDownloadDir();
+    const previous = await this.pointedDownload();
     await this.writeJsonAtomically(path.join(this.storageRoot, POINTER_FILE), { dir: dirName });
     if (previous) {
-      const retired = await this.readRetired();
-      retired[path.relative(this.storageRoot, previous)] = Date.now();
-      await this.writeJsonAtomically(path.join(this.storageRoot, RETIRED_FILE), retired);
+      await this.updateRetired(async () => {
+        const retired = await this.readRetired();
+        retired[path.relative(this.storageRoot, previous)] = Date.now();
+        await this.writeJsonAtomically(path.join(this.storageRoot, RETIRED_FILE), retired);
+      });
     }
     await this.noticeEngineChange();
   }
@@ -169,19 +218,21 @@ export class PdfjsManager {
   // once they've been retired longer than the retention period, and any
   // install staging left behind by an interrupted install.
   async removeUnusedEngines(inUse: ReadonlySet<string>): Promise<void> {
-    const retired = await this.readRetired();
-    let changed = false;
-    for (const [relative, retiredAt] of Object.entries(retired)) {
-      const dir = path.join(this.storageRoot, relative);
-      if (!inUse.has(dir) && Date.now() - retiredAt >= this.retentionMs) {
-        await fs.rm(dir, { recursive: true, force: true });
-        delete retired[relative];
-        changed = true;
+    await this.updateRetired(async () => {
+      const retired = await this.readRetired();
+      let changed = false;
+      for (const [relative, retiredAt] of Object.entries(retired)) {
+        const dir = path.join(this.storageRoot, relative);
+        if (!inUse.has(dir) && Date.now() - retiredAt >= this.retentionMs) {
+          await fs.rm(dir, { recursive: true, force: true });
+          delete retired[relative];
+          changed = true;
+        }
       }
-    }
-    if (changed) {
-      await this.writeJsonAtomically(path.join(this.storageRoot, RETIRED_FILE), retired);
-    }
+      if (changed) {
+        await this.writeJsonAtomically(path.join(this.storageRoot, RETIRED_FILE), retired);
+      }
+    });
     try {
       for (const entry of await fs.readdir(this.storageRoot)) {
         if (entry.startsWith("staging-") && !this.installing) {
@@ -344,6 +395,16 @@ export class PdfjsManager {
   }
 
   private async installWithFeedback(version: string): Promise<void> {
+    // The built-in copy is that exact version: use it rather than download
+    // a duplicate.
+    const bundledVersion = await readMetaVersion(this.bundledDir.fsPath);
+    if (bundledVersion !== null && compareVersions(version, bundledVersion) === 0 && parseVersion(version)) {
+      await this.resetToBundled();
+      await vscode.window.showInformationMessage(
+        `PDF Phoenix is now using pdf.js ${version}, the version built into it. ${OPEN_PDFS_SWITCH}`
+      );
+      return;
+    }
     try {
       await this.install(version);
       await vscode.window.showInformationMessage(
@@ -507,6 +568,10 @@ export const OPEN_PDFS_SWITCH =
 
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+export function keepDownloadedVersion(): boolean {
+  return vscode.workspace.getConfiguration("pdfPhoenix").get<boolean>("pdfjs.keepDownloadedVersion", false);
 }
 
 // A usable engine folder: it has the viewer and the version marker.

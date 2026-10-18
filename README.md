@@ -11,7 +11,7 @@ PDF extensions for VS Code typically bundle a fixed pdf.js that only changes whe
 - **Ships with the latest pdf.js** (6.4.299 in this release).
 - **Updates itself.** About once a day it checks Mozilla's releases and offers any newer version within the same major version. It never jumps to a new major version on its own.
 - **Verifies every download** against the SHA-256 digest GitHub publishes for it, before using it.
-- **Puts you in control.** Pick any release, or go back to the built-in one, from the Command Palette at any time. Open PDFs switch over right away.
+- **Puts you in control.** Pick any release, or go back to the built-in one, from the Command Palette at any time. Open PDFs switch over right away. Need to stay on one version? A setting keeps it even after PDF Phoenix updates.
 
 So a pdf.js fix reaches you as soon as Mozilla ships it, not whenever this extension is next updated. Details in [Keeping the PDF engine up to date](#keeping-the-pdf-engine-up-to-date).
 
@@ -90,7 +90,7 @@ PDF Phoenix always ships with a bundled, tested version of pdf.js. On top of tha
 
 Every download is checked before anything is extracted: its size and SHA-256 digest must match what GitHub publishes for that release. GitHub only publishes digests for releases from mid-2025 on, so for older releases PDF Phoenix can check the size only, and asks before installing one. If the release details can't be fetched at all, nothing is installed. A downloaded copy is then validated before it's used, and anything that fails to download, verify or validate leaves your current engine untouched.
 
-Downloaded versions are stored per-user and survive extension updates, each in its own folder. Switching versions applies to open PDFs right away, in every VS Code window (or, for any with unsaved changes, once you save or revert them). A replaced version's folder is removed once no open PDF uses it any more; since PDFs open in other windows can't be tracked, it's kept for up to a week first.
+Downloaded versions are stored per-user, each in its own folder. When a PDF Phoenix update brings a built-in pdf.js that is the same as or newer than your downloaded one, the built-in version takes over and the old download is removed. To stay on a version you chose even then, turn on `pdfPhoenix.pdfjs.keepDownloadedVersion` (and turn off `pdfPhoenix.pdfjs.autoCheckForUpdates` so you aren't offered newer releases). Switching versions applies to open PDFs right away, in every VS Code window (or, for any with unsaved changes, once you save or revert them). A replaced version's folder is removed once no open PDF uses it any more; since PDFs open in other windows can't be tracked, it's kept for up to a week first.
 
 If a PDF can't be opened, PDF Phoenix says why instead of leaving the editor blank. When that happens on a downloaded pdf.js (for example, one needing a newer VS Code than yours), the message offers to switch back to the built-in version.
 
@@ -112,6 +112,7 @@ If a PDF can't be opened, PDF Phoenix says why instead of leaving the editor bla
 | `pdfPhoenix.annotations.textColor` | `#000000` | Text color the text tool starts with, as a hex color. |
 | `pdfPhoenix.annotations.textSize` | `10` | Font size the text tool starts with, from 5 to 100. |
 | `pdfPhoenix.pdfjs.autoCheckForUpdates` | `true` | Check about once a day for a newer pdf.js within the current major version and ask before downloading. Major-version upgrades are never automatic. User setting only: a folder's workspace settings can't turn it off. |
+| `pdfPhoenix.pdfjs.keepDownloadedVersion` | `false` | Keep using a downloaded or chosen pdf.js even after a PDF Phoenix update brings a built-in version that is the same or newer. When off, the newer built-in version takes over. User setting only. |
 
 The theme settings apply to open PDFs right away. The others apply to PDFs you open after changing them.
 

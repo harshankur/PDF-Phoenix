@@ -148,6 +148,16 @@ export interface Release {
   prerelease: boolean;
 }
 
+// Whether a downloaded pdf.js should give way to the built-in one: once an
+// extension update ships a built-in copy at least as new, it does, unless the
+// user chose to keep the downloaded version (pdfPhoenix.pdfjs.keepDownloadedVersion).
+export function builtInSupersedes(downloaded: string | null, builtIn: string | null, keepDownloaded: boolean): boolean {
+  if (keepDownloaded || !downloaded || !builtIn || !parseVersion(downloaded) || !parseVersion(builtIn)) {
+    return false;
+  }
+  return compareVersions(downloaded, builtIn) <= 0;
+}
+
 // The release an automatic or "check now" update should offer: the newest
 // stable release in the active version's major line that is newer than the
 // active version, or null when there is none. Never crosses a major version,

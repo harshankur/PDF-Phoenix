@@ -2,7 +2,7 @@
   "name": "pdf-phoenix",
   "displayName": "PDF Phoenix",
   "description": "PDF viewer and annotator for VS Code. Save highlights and notes into the file, export them to Markdown, move them between PDFs and tools as XFDF, read in your theme's colors, and pick up where you left off, on a self-updating, verified Mozilla pdf.js engine.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "publisher": "harshankur",
   "icon": "media/icon.png",
   "repository": {
@@ -302,6 +302,12 @@
           "default": true,
           "scope": "application",
           "markdownDescription": "Check about once a day for a newer pdf.js release within the current major version, and ask before downloading it. Major-version upgrades are never installed automatically; use the \"PDF Phoenix: Choose pdf.js Version…\" command for those."
+        },
+        "pdfPhoenix.pdfjs.keepDownloadedVersion": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "markdownDescription": "Keep using the pdf.js version you downloaded or chose, even after a PDF Phoenix update brings a built-in version that is the same or newer. When off, the newer built-in version takes over and the old download is removed. To stay on one version, also turn off `#pdfPhoenix.pdfjs.autoCheckForUpdates#`."
         }
       }
     }

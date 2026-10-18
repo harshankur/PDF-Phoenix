@@ -7,6 +7,7 @@ import {
   PATCHES,
   PRUNE_PATHS,
   VIEWER_HTML_ANCHORS,
+  builtInSupersedes,
   checkDownload,
   compareVersions,
   distAssetName,
@@ -56,6 +57,25 @@ describe("compareVersions", () => {
 
   it("treats unparseable versions as equal rather than throwing", () => {
     assert.strictEqual(compareVersions("nope", "6.1.200"), 0);
+  });
+});
+
+describe("builtInSupersedes", () => {
+  it("prefers a built-in pdf.js that is the same or newer than the download", () => {
+    assert.strictEqual(builtInSupersedes("6.3.289", "6.4.299", false), true);
+    assert.strictEqual(builtInSupersedes("6.4.299", "6.4.299", false), true);
+    assert.strictEqual(builtInSupersedes("5.9.0", "6.0.0", false), true);
+  });
+
+  it("keeps a newer download, or any download when told to keep it", () => {
+    assert.strictEqual(builtInSupersedes("6.10.0", "6.4.299", false), false);
+    assert.strictEqual(builtInSupersedes("6.3.289", "6.4.299", true), false);
+  });
+
+  it("keeps the download when either version is unknown", () => {
+    assert.strictEqual(builtInSupersedes(null, "6.4.299", false), false);
+    assert.strictEqual(builtInSupersedes("6.3.289", null, false), false);
+    assert.strictEqual(builtInSupersedes("nightly", "6.4.299", false), false);
   });
 });
 

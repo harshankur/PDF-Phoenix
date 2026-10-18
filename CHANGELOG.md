@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.1
+
+### Fixes
+
+- **The built-in pdf.js now takes over after an update.** A pdf.js you downloaded earlier stayed in use even when a PDF Phoenix update brought a newer built-in version (for example, 6.3.289 downloaded under 1.0.x stayed active after 1.1.0 shipped 6.4.299). Now a download that is the same as or older than the built-in version gives way to it, and its folder is removed.
+- Choosing the built-in version's own number from **Choose pdf.js Version...** or an update check now switches to the built-in copy instead of downloading a duplicate.
+- Two cleanups of old pdf.js folders running at once could clash and forget a folder that was due for removal.
+
+### New
+
+- **`pdfPhoenix.pdfjs.keepDownloadedVersion`** (off by default) keeps the pdf.js version you downloaded or chose even after an update brings a newer built-in one, for anyone who needs to stay on a specific version.
+
 ## 1.1.0
 
 ### New
