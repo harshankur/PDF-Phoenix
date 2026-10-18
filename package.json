@@ -1,8 +1,8 @@
 {
   "name": "pdf-phoenix",
   "displayName": "PDF Phoenix",
-  "description": "PDF viewer and annotator for VS Code. Save highlights and notes into the file, on a self-updating Mozilla pdf.js engine. Allows customizing the default viewer settings.",
-  "version": "1.0.3",
+  "description": "PDF viewer and annotator for VS Code. Save highlights and notes into the file, export them to Markdown, move them between PDFs and tools as XFDF, read in your theme's colors, and pick up where you left off, on a self-updating, verified Mozilla pdf.js engine.",
+  "version": "1.1.0",
   "publisher": "harshankur",
   "icon": "media/icon.png",
   "repository": {
@@ -15,7 +15,7 @@
   "homepage": "https://github.com/harshankur/PDF-Phoenix#readme",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.49.0"
+    "vscode": "^1.123.0"
   },
   "categories": [
     "Other"
@@ -29,10 +29,20 @@
     "annotate",
     "annotation",
     "highlight",
-    "pdf.js"
+    "pdf.js",
+    "export annotations",
+    "markdown",
+    "dark mode",
+    "xfdf"
   ],
   "main": "./out/extension.js",
   "activationEvents": [],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In Restricted Mode, JavaScript embedded in PDFs (used by some interactive forms) does not run. Viewing, annotating, and saving work as usual."
+    }
+  },
   "contributes": {
     "customEditors": [
       {
@@ -47,6 +57,21 @@
       }
     ],
     "commands": [
+      {
+        "command": "pdfPhoenix.exportAnnotations",
+        "title": "Export Annotations to Markdown",
+        "category": "PDF Phoenix"
+      },
+      {
+        "command": "pdfPhoenix.exportAnnotationsXfdf",
+        "title": "Export Annotations as XFDF…",
+        "category": "PDF Phoenix"
+      },
+      {
+        "command": "pdfPhoenix.importAnnotations",
+        "title": "Import Annotations from XFDF…",
+        "category": "PDF Phoenix"
+      },
       {
         "command": "pdfPhoenix.pdfjs.checkForUpdate",
         "title": "Check for pdf.js Updates",
@@ -63,9 +88,64 @@
         "category": "PDF Phoenix"
       }
     ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "pdfPhoenix.exportAnnotations",
+          "when": "activeCustomEditorId == pdfPhoenix.viewer"
+        },
+        {
+          "command": "pdfPhoenix.exportAnnotationsXfdf",
+          "when": "activeCustomEditorId == pdfPhoenix.viewer"
+        },
+        {
+          "command": "pdfPhoenix.importAnnotations",
+          "when": "activeCustomEditorId == pdfPhoenix.viewer"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "pdfPhoenix.exportAnnotations",
+          "when": "activeCustomEditorId == pdfPhoenix.viewer",
+          "group": "pdfPhoenix"
+        },
+        {
+          "command": "pdfPhoenix.exportAnnotationsXfdf",
+          "when": "activeCustomEditorId == pdfPhoenix.viewer",
+          "group": "pdfPhoenix"
+        },
+        {
+          "command": "pdfPhoenix.importAnnotations",
+          "when": "activeCustomEditorId == pdfPhoenix.viewer",
+          "group": "pdfPhoenix"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "pdfPhoenix.exportAnnotations",
+          "when": "resourceExtname =~ /^\\.pdf$/i",
+          "group": "7_pdfPhoenix"
+        },
+        {
+          "command": "pdfPhoenix.exportAnnotationsXfdf",
+          "when": "resourceExtname =~ /^\\.pdf$/i",
+          "group": "7_pdfPhoenix"
+        },
+        {
+          "command": "pdfPhoenix.importAnnotations",
+          "when": "resourceExtname =~ /^\\.pdf$/i",
+          "group": "7_pdfPhoenix"
+        }
+      ]
+    },
     "configuration": {
       "title": "PDF Phoenix",
       "properties": {
+        "pdfPhoenix.rememberViewState": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Reopen each PDF where you left off: page, zoom, scroll position, rotation, sidebar panel, and scroll/spread mode. Remembered per workspace for the 200 most recently viewed PDFs. The `defaultZoom`, `defaultSidebar`, `defaultScrollMode` and `defaultSpreadMode` settings then apply to PDFs you haven't opened before."
+        },
         "pdfPhoenix.defaultZoom": {
           "type": "string",
           "default": "page-fit",
@@ -98,26 +178,151 @@
           ],
           "markdownDescription": "Which sidebar panel a PDF opens with. Applies to PDFs you open after changing this."
         },
+        "pdfPhoenix.defaultScrollMode": {
+          "type": "string",
+          "default": "document",
+          "enum": [
+            "document",
+            "vertical",
+            "horizontal",
+            "wrapped",
+            "page"
+          ],
+          "enumDescriptions": [
+            "Use the layout the PDF asks for, otherwise scroll vertically",
+            "Scroll through pages vertically",
+            "Scroll through pages horizontally",
+            "Wrap pages into rows, like a grid",
+            "Show one page (or spread) at a time"
+          ],
+          "markdownDescription": "How pages are laid out for scrolling when a PDF opens. Applies to PDFs you open after changing this."
+        },
+        "pdfPhoenix.defaultSpreadMode": {
+          "type": "string",
+          "default": "document",
+          "enum": [
+            "document",
+            "none",
+            "odd",
+            "even"
+          ],
+          "enumDescriptions": [
+            "Use the layout the PDF asks for, otherwise single pages",
+            "Single pages",
+            "Two pages side by side, starting with odd-numbered pages (like a book with its cover on its own)",
+            "Two pages side by side, starting with even-numbered pages"
+          ],
+          "markdownDescription": "Whether pages are shown singly or as two-page spreads when a PDF opens. Applies to PDFs you open after changing this."
+        },
+        "pdfPhoenix.defaultCursorTool": {
+          "type": "string",
+          "default": "select",
+          "enum": [
+            "select",
+            "hand"
+          ],
+          "enumDescriptions": [
+            "Select text with the pointer",
+            "Drag pages around with the pointer (hand tool)"
+          ],
+          "markdownDescription": "The pointer tool a PDF opens with. Applies to PDFs you open after changing this."
+        },
+        "pdfPhoenix.viewerTheme": {
+          "type": "string",
+          "default": "match-vscode",
+          "enum": [
+            "match-vscode",
+            "light",
+            "dark"
+          ],
+          "enumDescriptions": [
+            "Use a light or dark viewer to match the current VS Code theme",
+            "Always use the light viewer",
+            "Always use the dark viewer"
+          ],
+          "markdownDescription": "Color scheme of the viewer's toolbar, sidebar, and dialogs. Follows VS Code theme changes live."
+        },
+        "pdfPhoenix.pageColors": {
+          "type": "string",
+          "default": "original",
+          "enum": [
+            "original",
+            "match-dark-themes",
+            "match-all-themes"
+          ],
+          "enumDescriptions": [
+            "Show pages in the document's own colors",
+            "Recolor pages to the editor's background and text colors while VS Code uses a dark theme",
+            "Recolor pages to the editor's background and text colors in every theme"
+          ],
+          "markdownDescription": "Recolor page content to match the VS Code editor. Recolored pages are drawn in two tones between the editor's text and background colors, so images lose their color. Display only: saved annotations keep the colors you chose. Open PDFs reload to pick up a change (keeping your place), or wait until you save or revert if they have unsaved changes."
+        },
+        "pdfPhoenix.annotations.highlightColor": {
+          "type": "string",
+          "default": "yellow",
+          "enum": [
+            "yellow",
+            "green",
+            "blue",
+            "pink",
+            "red"
+          ],
+          "markdownDescription": "Color the highlight tool starts with. You can still pick another color for each highlight. Applies to PDFs you open after changing this."
+        },
+        "pdfPhoenix.annotations.inkColor": {
+          "type": "string",
+          "default": "#000000",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "patternErrorMessage": "Use a hex color such as #1E90FF.",
+          "markdownDescription": "Color the draw (ink) tool starts with, as a hex color such as `#1E90FF`. Applies to PDFs you open after changing this."
+        },
+        "pdfPhoenix.annotations.inkThickness": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 20,
+          "markdownDescription": "Line thickness the draw (ink) tool starts with, from 1 to 20. Applies to PDFs you open after changing this."
+        },
+        "pdfPhoenix.annotations.textColor": {
+          "type": "string",
+          "default": "#000000",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "patternErrorMessage": "Use a hex color such as #1E90FF.",
+          "markdownDescription": "Text color the text tool starts with, as a hex color such as `#1E90FF`. Applies to PDFs you open after changing this."
+        },
+        "pdfPhoenix.annotations.textSize": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 5,
+          "maximum": 100,
+          "markdownDescription": "Font size the text tool starts with, from 5 to 100. Applies to PDFs you open after changing this."
+        },
         "pdfPhoenix.pdfjs.autoCheckForUpdates": {
           "type": "boolean",
           "default": true,
+          "scope": "application",
           "markdownDescription": "Check about once a day for a newer pdf.js release within the current major version, and ask before downloading it. Major-version upgrades are never installed automatically; use the \"PDF Phoenix: Choose pdf.js Version…\" command for those."
         }
       }
     }
   },
   "scripts": {
-    "fetch-assets": "node scripts/fetch-pdfjs.mjs",
+    "fetch-assets": "tsc -p . && node scripts/fetch-pdfjs.mjs",
     "compile": "tsc -p .",
     "watch": "tsc -w -p .",
-    "vscode:prepublish": "npm run fetch-assets && npm run compile",
-    "package": "vsce package"
+    "vscode:prepublish": "npm run fetch-assets",
+    "package": "vsce package",
+    "test": "npm run compile && npm run test:unit && npm run test:integration",
+    "test:unit": "mocha \"out/test/unit/**/*.test.js\"",
+    "test:integration": "node ./out/test/runTests.js"
   },
   "devDependencies": {
-    "@types/vscode": "^1.49.0",
+    "@types/mocha": "^10.0.10",
     "@types/node": "^20.14.0",
-    "typescript": "^5.5.0",
-    "extract-zip": "^2.0.1",
-    "@vscode/vsce": "^3.0.0"
+    "@types/vscode": "~1.120.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.0.0",
+    "mocha": "^12.0.3",
+    "typescript": "^5.5.0"
   }
 }

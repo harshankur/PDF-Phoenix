@@ -19,9 +19,30 @@ jobs:
 
       - run: npm ci
 
+      # The bundled pdf.js viewer isn't in git; the integration tests need it.
+      - run: npm run fetch-assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - run: npm run compile
 
+      - run: npm run test:unit
+
+      # Downloads VS Code and runs the integration suites in it; Linux runners
+      # have no display, so give it a virtual one.
+      - run: xvfb-run -a npm run test:integration
+
+      # Again on the oldest VS Code the extension declares support for
+      # (engines.vscode), so a pdf.js bump that needs a newer Chromium fails
+      # here instead of shipping a blank viewer to users on that version.
+      - name: Integration tests on the minimum supported VS Code
+        run: |
+          PDFPHOENIX_VSCODE_VERSION="$(node -p "require('./package.json').engines.vscode.replace(/^[^0-9]*/, '')")" \
+            xvfb-run -a npm run test:integration
+
       - run: npx vsce package
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/upload-artifact@v4
         with:

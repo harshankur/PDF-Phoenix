@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.1.0
+
+### New
+
+- **Bundled pdf.js updated to 6.4.299** (from 6.1.200), the latest Mozilla release.
+- **Theme-matched viewing.** The viewer's toolbar, sidebar, and dialogs follow VS Code's light or dark theme, switching live. Pin one with `pdfPhoenix.viewerTheme` (`match-vscode`, `light`, `dark`). The new `pdfPhoenix.pageColors` setting can also recolor page content to the editor's background and text colors, in dark themes only (`match-dark-themes`) or always (`match-all-themes`); off by default, and display only, so saved annotation colors are unaffected.
+- **Picks up where you left off.** Reopening a PDF restores its page, zoom, scroll position, rotation, sidebar panel, and scroll/spread mode, remembered per workspace for the 200 most recently viewed PDFs. Turn off with `pdfPhoenix.rememberViewState`.
+- **Export Annotations to Markdown.** A new command (Command Palette, the PDF editor's `...` menu, or right-clicking a PDF in the Explorer) lists every highlight, note, text box, drawing, stamp and shape by page, with highlighted text quoted and colors, authors and dates, including annotations not saved yet. It opens as an untitled Markdown document.
+- **XFDF export and import.** **Export Annotations as XFDF…** writes a PDF's annotations in the standard exchange format Acrobat and other PDF tools use, keeping positions, shapes, colors, notes, authors and dates. **Import Annotations from XFDF…** adds the highlights, drawings and text boxes (with their notes) from an XFDF file to the open PDF as unsaved, undoable edits, asks first if the file was made for a different PDF, and reports any annotation types it couldn't create.
+- **Annotation tool defaults.** `pdfPhoenix.annotations.highlightColor`, `inkColor`, `inkThickness`, `textColor` and `textSize` set the colors and sizes the highlight, draw and text tools start with.
+- **More opening defaults.** `pdfPhoenix.defaultScrollMode`, `defaultSpreadMode` (two-page spreads) and `defaultCursorTool` (text selection or hand tool). Scroll and spread default to whatever layout the PDF itself asks for.
+- **Display language.** The viewer's toolbar and menus now follow VS Code's display language rather than the system's.
+- **Restricted Mode.** PDF Phoenix now works in untrusted folders instead of being disabled there (which made PDFs open as raw text). JavaScript embedded in PDFs does not run in Restricted Mode; trusting the folder turns it on.
+- **Engine switches apply to open PDFs.** Changing the pdf.js version now rebuilds open PDFs right away, in every VS Code window (or after the next save or revert, if they have unsaved changes), instead of only affecting PDFs opened afterwards. Each downloaded version gets its own folder, and a replaced one is only removed once nothing uses it, so a PDF still open on the previous version never loses the fonts or image decoders it loads from there.
+- **No more blank editors.** If pdf.js can't start or can't open a document, PDF Phoenix says why. When a downloaded pdf.js is the cause, it offers to switch back to the built-in one.
+
+### Security
+
+- Downloaded pdf.js releases are now checked against the size and SHA-256 digest GitHub publishes for them before anything is extracted. Releases without a published digest (before mid-2025) are installed only after you confirm a size-only check; if the release details can't be fetched, nothing is installed. The bundled copy is verified the same way at build time, and the build now reuses the extension's own unzip and preparation code instead of the `extract-zip` package (which has an unfixed advisory).
+- The pdf.js unzipper rejects absolute entry paths, truncated or ZIP64 archives, and entries that expand past their declared size.
+- `pdfPhoenix.pdfjs.autoCheckForUpdates` is now a user-level setting, so a folder's workspace settings can no longer switch off update checks for the pdf.js engine shared across all of VS Code.
+
+### Performance
+
+- pdf.js now actually parses PDFs in its Web Worker. Its worker had never been able to start inside the webview, so every PDF was parsed on the viewer's own thread, freezing the UI on large documents.
+- PDFs now cross between VS Code and the viewer as binary data rather than base64 text. On a 40 MB PDF: open 763 ms to 274 ms, save 493 ms to 131 ms, revert 497 ms to 205 ms.
+
+### Fixes
+
+- **Unsaved annotations are no longer lost after a restart or crash.** VS Code's hot exit backs up a PDF with unsaved changes, but on restoring it PDF Phoenix showed the file from disk instead of the backup, under the unsaved-changes dot; saving then overwrote the annotations for good. Restored PDFs now show exactly what was backed up.
+
+- Reloads that should happen (a PDF changed on disk, or a theme change calling for different page colors) silently didn't: VS Code ignores re-assigning a webview the same HTML.
+- A PDF that changed on disk while it had unsaved annotations was reloaded, silently discarding them. Unsaved annotations are now kept, with a notification offering to reload from disk.
+- pdf.js's own hidden view history (keyed by file contents) could open a PDF at a page from an identical copy elsewhere. Opening is now driven only by PDF Phoenix's settings and its own per-file memory.
+- **PDF Phoenix: Use Built-in pdf.js Version** no longer stays "running" until its confirmation is dismissed.
+- A save or hot-exit backup no longer waits out a 10-second timeout when the PDF's viewer has just closed; it fails immediately, so VS Code can move on. Likewise, an export or import running when its viewer reloads fails at once instead of after two minutes.
+- An edit made in the moment before a PDF changed on disk (or before a theme, trust or engine change reloaded it) could be lost to the reload; the viewer is now asked for any such edit first.
+- Saving a large PDF to a slow or network drive could mistake its own write for a change made elsewhere and reload the viewer.
+- A PDF whose own scripts fill in form fields when it opens no longer shows as having unsaved changes straight away.
+- A downloaded pdf.js whose `viewer.html` PDF Phoenix can't hook into is rejected at install, and if one is ever found when opening a PDF, the editor says so (offering the built-in pdf.js) instead of staying blank.
+
+### Changed
+
+- **Minimum VS Code version is now 1.123.0.** The previously declared minimum (`1.49`) was never accurate: the bundled pdf.js 6 needs browser features (such as `Uint8Array.prototype.toHex`) that first shipped in the Chromium inside VS Code 1.123.0, and on older versions the viewer stayed blank. The new minimum comes from running the test suite against successive VS Code releases.
+
+### Development
+
+- Added a test suite: unit tests for the version, download-verification, unzip, Markdown and XFDF logic, and integration tests that run the extension in a real, downloaded VS Code (trusted workspace, Restricted Mode, and a non-English display language). CI runs both.
+
 ## 1.0.3
 
 - Fix: PDFs failed to render on any downloaded pdf.js engine (every version chosen through "Check for Updates" or "Choose Version…"), showing a blank editor. pdf.js's `viewer.html` ships its own Content-Security-Policy locked to `script-src 'self'` / `style-src 'self'`; inlined unchanged into a webview, that `'self'` matches the shell document's origin rather than the resource host serving the files, so every script and stylesheet was blocked. The bundled engine (served from the extension directory) happened to slip through, but a downloaded engine lives on a different resource host in global storage and was blocked outright. The policy is now rebuilt from `webview.cspSource` so scripts and styles load from either host.

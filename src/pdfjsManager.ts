@@ -1,42 +1,100 @@
+import { watch as watchFs } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { unzipToDir } from "./unzip";
-import { compareVersions, parseVersion, preparePdfjsDir, readMetaVersion, writeMeta } from "./pdfjs";
+import {
+  Release,
+  ReleaseAsset,
+  checkDownload,
+  compareVersions,
+  findDistAsset,
+  majorChangeWarning,
+  parseVersion,
+  pickUpdate,
+  preparePdfjsDir,
+  readMetaVersion,
+  writeMeta,
+} from "./pdfjs";
 
 const RELEASES_API = "https://api.github.com/repos/mozilla/pdf.js/releases?per_page=100";
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const LAST_CHECK_KEY = "pdfPhoenix.lastUpdateCheck";
 const SKIPPED_VERSION_KEY = "pdfPhoenix.skippedVersion";
 
-interface Release {
-  version: string;
-  prerelease: boolean;
-}
+// Downloaded engines live in their own folders under global storage, one per
+// install, and a pointer file names the active one. Switching engines only
+// rewrites the pointer: a folder that open viewers still load assets from
+// (fonts, cMaps, image decoders) is never touched while they need it.
+const ENGINES_DIR = "engines";
+const POINTER_FILE = "active-engine.json";
+const RETIRED_FILE = "retired-engines.json";
+// The 1.0.x layout: a single downloaded copy in "pdfjs".
+const LEGACY_DIR = "pdfjs";
+// How long a superseded engine folder is kept. Viewers in this window are
+// tracked exactly; viewers in other VS Code windows (which share global
+// storage) get the pointer change too and rebuild, except any with unsaved
+// changes, which this leaves days to be saved or reverted.
+const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Owns everything about which pdf.js build is in effect: resolving between the
 // bundled fallback and a downloaded copy, checking Mozilla's releases, and
 // downloading/installing/resetting on request.
 export class PdfjsManager {
+  private readonly engineChanged = new vscode.EventEmitter<void>();
+  // Fires after a different pdf.js has been installed or the built-in one
+  // restored, so open viewers can be rebuilt on it.
+  readonly onDidChangeEngine = this.engineChanged.event;
+
+  private retentionMs = DEFAULT_RETENTION_MS;
+  private lastActiveRoot: string | undefined;
+
   constructor(private readonly context: vscode.ExtensionContext) {}
+
+  private get storageRoot(): string {
+    return this.context.globalStorageUri.fsPath;
+  }
 
   private get bundledDir(): vscode.Uri {
     return vscode.Uri.joinPath(this.context.extensionUri, "media", "pdfjs");
   }
 
-  private get downloadedDir(): vscode.Uri {
-    return vscode.Uri.joinPath(this.context.globalStorageUri, "pdfjs");
+  // The folder of the active downloaded engine, or null for the built-in
+  // one. No pointer yet means the 1.0.x layout, if that copy exists.
+  private async activeDownloadDir(): Promise<string | null> {
+    let pointer: { dir?: unknown } | null = null;
+    try {
+      pointer = JSON.parse(await fs.readFile(path.join(this.storageRoot, POINTER_FILE), "utf8"));
+    } catch {
+      pointer = null;
+    }
+    const candidate =
+      pointer === null
+        ? path.join(this.storageRoot, LEGACY_DIR)
+        : typeof pointer.dir === "string" && /^[\w.-]+$/.test(pointer.dir)
+          ? path.join(this.storageRoot, ENGINES_DIR, pointer.dir)
+          : null;
+    return candidate && (await isValidEngine(candidate)) ? candidate : null;
   }
 
-  // The pdf.js root the webview should load from: the downloaded copy when a
-  // valid one exists, otherwise the bundled fallback.
+  // The pdf.js root the webview should load from: the active downloaded copy
+  // when there is a valid one, otherwise the bundled fallback. A download's
+  // URI is built from globalStorageUri, not Uri.file: global storage can use
+  // its own scheme (vscode-userdata), and the webview only serves files under
+  // the roots it was given (localResourceRoots), compared scheme and all.
   async activeRootUri(): Promise<vscode.Uri> {
-    return (await this.hasValidDownload()) ? this.downloadedDir : this.bundledDir;
+    const dir = await this.activeDownloadDir();
+    if (!dir) {
+      return this.bundledDir;
+    }
+    const segments = path.relative(this.storageRoot, dir).split(path.sep);
+    return vscode.Uri.joinPath(this.context.globalStorageUri, ...segments);
   }
 
   async activeInfo(): Promise<{ version: string | null; source: "downloaded" | "bundled" }> {
-    if (await this.hasValidDownload()) {
-      return { version: await readMetaVersion(this.downloadedDir.fsPath), source: "downloaded" };
+    const dir = await this.activeDownloadDir();
+    if (dir) {
+      return { version: await readMetaVersion(dir), source: "downloaded" };
     }
     return { version: await readMetaVersion(this.bundledDir.fsPath), source: "bundled" };
   }
@@ -47,13 +105,121 @@ export class PdfjsManager {
     return [vscode.Uri.joinPath(this.context.extensionUri, "media"), this.context.globalStorageUri];
   }
 
-  private async hasValidDownload(): Promise<boolean> {
-    try {
-      await fs.access(path.join(this.downloadedDir.fsPath, "web", "viewer.html"));
-      return (await readMetaVersion(this.downloadedDir.fsPath)) !== null;
-    } catch {
-      return false;
+  // Follow engine switches made in other VS Code windows (which share global
+  // storage) by watching the pointer file, so their open PDFs move to the new
+  // engine too rather than keep loading from a folder that will be removed.
+  async startWatching(): Promise<vscode.Disposable> {
+    this.lastActiveRoot = (await this.activeRootUri()).fsPath;
+    await fs.mkdir(this.storageRoot, { recursive: true });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const watcher = watchFs(this.storageRoot, (_event, file) => {
+      if (file && String(file) !== POINTER_FILE) {
+        return;
+      }
+      clearTimeout(timer);
+      timer = setTimeout(() => void this.noticeEngineChange(), 200);
+    });
+    watcher.on("error", () => undefined);
+    return new vscode.Disposable(() => {
+      clearTimeout(timer);
+      watcher.close();
+    });
+  }
+
+  // Fire onDidChangeEngine if the active engine differs from the last one
+  // seen, whoever changed it.
+  private async noticeEngineChange(): Promise<void> {
+    const root = (await this.activeRootUri()).fsPath;
+    if (root !== this.lastActiveRoot) {
+      this.lastActiveRoot = root;
+      this.engineChanged.fire();
     }
+  }
+
+  private async readRetired(): Promise<Record<string, number>> {
+    try {
+      const parsed = JSON.parse(await fs.readFile(path.join(this.storageRoot, RETIRED_FILE), "utf8"));
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private async writeJsonAtomically(file: string, value: unknown): Promise<void> {
+    const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    await fs.writeFile(temp, JSON.stringify(value), "utf8");
+    await fs.rename(temp, file);
+  }
+
+  // Point at a different engine (a folder under engines/, or null for the
+  // built-in one), retiring the previously active download.
+  private async activate(dirName: string | null): Promise<void> {
+    await fs.mkdir(this.storageRoot, { recursive: true });
+    const previous = await this.activeDownloadDir();
+    await this.writeJsonAtomically(path.join(this.storageRoot, POINTER_FILE), { dir: dirName });
+    if (previous) {
+      const retired = await this.readRetired();
+      retired[path.relative(this.storageRoot, previous)] = Date.now();
+      await this.writeJsonAtomically(path.join(this.storageRoot, RETIRED_FILE), retired);
+    }
+    await this.noticeEngineChange();
+  }
+
+  // Delete retired engine folders no viewer in this window uses any more,
+  // once they've been retired longer than the retention period, and any
+  // install staging left behind by an interrupted install.
+  async removeUnusedEngines(inUse: ReadonlySet<string>): Promise<void> {
+    const retired = await this.readRetired();
+    let changed = false;
+    for (const [relative, retiredAt] of Object.entries(retired)) {
+      const dir = path.join(this.storageRoot, relative);
+      if (!inUse.has(dir) && Date.now() - retiredAt >= this.retentionMs) {
+        await fs.rm(dir, { recursive: true, force: true });
+        delete retired[relative];
+        changed = true;
+      }
+    }
+    if (changed) {
+      await this.writeJsonAtomically(path.join(this.storageRoot, RETIRED_FILE), retired);
+    }
+    try {
+      for (const entry of await fs.readdir(this.storageRoot)) {
+        if (entry.startsWith("staging-") && !this.installing) {
+          await fs.rm(path.join(this.storageRoot, entry), { recursive: true, force: true });
+        }
+      }
+    } catch {
+      // No storage yet.
+    }
+  }
+
+  // Test hooks (ExtensionMode.Test only, see extension.ts).
+  setRetentionForTests(ms: number): void {
+    this.retentionMs = ms;
+  }
+
+  // Install a copy of the bundled engine as if it had been downloaded, for
+  // tests that can't reach GitHub; breakViewerHtml removes the script tag
+  // PDF Phoenix hooks into, to check such an engine is rejected.
+  async installBundledCopyForTests(version: string, options: { breakViewerHtml?: boolean } = {}): Promise<void> {
+    this.installing = true;
+    try {
+      await this.installBundledCopy(version, options);
+    } finally {
+      this.installing = false;
+    }
+  }
+
+  private async installBundledCopy(version: string, options: { breakViewerHtml?: boolean }): Promise<void> {
+    const staging = path.join(this.storageRoot, `staging-test-${Date.now()}`);
+    await fs.mkdir(this.storageRoot, { recursive: true });
+    await fs.cp(this.bundledDir.fsPath, staging, { recursive: true });
+    if (options.breakViewerHtml) {
+      const viewer = path.join(staging, "web", "viewer.html");
+      const html = await fs.readFile(viewer, "utf8");
+      await fs.writeFile(viewer, html.replace('<script src="viewer.mjs" type="module"></script>', ""), "utf8");
+    }
+    await this.installPrepared(staging, version);
   }
 
   // ---------- networking ----------
@@ -76,33 +242,59 @@ export class PdfjsManager {
     return releases;
   }
 
-  private async downloadZip(version: string): Promise<Buffer> {
-    const url = `https://github.com/mozilla/pdf.js/releases/download/v${version}/pdfjs-${version}-dist.zip`;
-    const res = await fetch(url, { redirect: "follow" });
+  // The release's viewer zip, with the size and SHA-256 digest GitHub
+  // publishes for it. Without these the download can't be verified, so
+  // failing to get them stops the install.
+  private async fetchDistAsset(version: string): Promise<ReleaseAsset> {
+    const res = await fetch(`https://api.github.com/repos/mozilla/pdf.js/releases/tags/v${version}`, {
+      headers: { "User-Agent": "PDF-Phoenix", Accept: "application/vnd.github+json" },
+    });
     if (!res.ok) {
-      throw new Error(`download failed (${res.status}) for v${version}`);
+      throw new Error(`could not get the details of v${version} from GitHub (${res.status}) to verify the download`);
+    }
+    const asset = findDistAsset(await res.json(), version);
+    if (!asset) {
+      throw new Error(`release v${version} has no viewer download`);
+    }
+    return asset;
+  }
+
+  private async downloadZip(asset: ReleaseAsset): Promise<Buffer> {
+    const res = await fetch(asset.url, { redirect: "follow" });
+    if (!res.ok) {
+      throw new Error(`download failed (${res.status}) for ${asset.name}`);
     }
     return Buffer.from(await res.arrayBuffer());
   }
 
   // ---------- install / reset ----------
 
-  // Only one install at a time: the staging dir below is a fixed, shared
-  // path, so two concurrent installs (e.g. a double command-palette
-  // invocation racing the startup auto-check prompt) would otherwise unzip
-  // two different versions into the same directory and swap in whatever
-  // interleaved mix happened to land.
+  // Only one install at a time (e.g. a double command-palette invocation
+  // racing the startup auto-check prompt), and while one runs, cleanup leaves
+  // staging folders alone.
   private installing = false;
 
-  // Download + extract into a staging dir, validate/prune/patch, then atomically
-  // swap it into place. The live copy isn't touched until the very last rename,
-  // so a failed or invalid download leaves the current viewer intact.
+  // Download, verify and extract into a staging folder, then hand it to
+  // installPrepared. The active engine isn't touched until the very end, so a
+  // failed or invalid download leaves the current viewer intact.
   async install(version: string): Promise<void> {
     if (this.installing) {
       throw new Error("PDF Phoenix is already installing a pdf.js version. Try again once it finishes.");
     }
     this.installing = true;
     try {
+      const asset = await this.fetchDistAsset(version);
+      if (!asset.digest) {
+        const proceed = await vscode.window.showWarningMessage(
+          `GitHub doesn't publish a checksum for pdf.js ${version} (it only does for releases from mid-2025 on), ` +
+            `so PDF Phoenix can only check the download's size, not that its contents are exactly what Mozilla released. Install it anyway?`,
+          { modal: true },
+          "Install Anyway"
+        );
+        if (proceed !== "Install Anyway") {
+          throw new Error("installation cancelled.");
+        }
+      }
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
@@ -110,42 +302,20 @@ export class PdfjsManager {
           cancellable: false,
         },
         async (progress) => {
-          const storageRoot = this.context.globalStorageUri.fsPath;
-          const staging = path.join(storageRoot, "staging");
-          const backup = path.join(storageRoot, "pdfjs-previous");
-          const target = this.downloadedDir.fsPath;
-
-          await fs.mkdir(storageRoot, { recursive: true });
-          await fs.rm(staging, { recursive: true, force: true });
-          await fs.mkdir(staging, { recursive: true });
-
           progress.report({ message: "downloading…" });
-          const zip = await this.downloadZip(version);
+          const zip = await this.downloadZip(asset);
+
+          // Before anything is extracted: the exact bytes Mozilla published.
+          progress.report({ message: "verifying…" });
+          checkDownload(zip, asset);
 
           progress.report({ message: "extracting…" });
+          const staging = path.join(this.storageRoot, `staging-${Date.now()}`);
+          await fs.mkdir(staging, { recursive: true });
           await unzipToDir(zip, staging);
 
           progress.report({ message: "validating…" });
-          await preparePdfjsDir(staging);
-          await writeMeta(staging, version);
-
-          // Move the current copy aside rather than deleting it outright, so a
-          // failed final rename leaves the working copy recoverable instead of
-          // silently falling back to the bundled fallback.
-          await fs.rm(backup, { recursive: true, force: true });
-          if (await pathExists(target)) {
-            await fs.rename(target, backup);
-          }
-          try {
-            await fs.rename(staging, target);
-          } catch (err) {
-            if (await pathExists(backup)) {
-              await fs.rm(target, { recursive: true, force: true });
-              await fs.rename(backup, target);
-            }
-            throw err;
-          }
-          await fs.rm(backup, { recursive: true, force: true });
+          await this.installPrepared(staging, version);
         }
       );
     } finally {
@@ -153,15 +323,31 @@ export class PdfjsManager {
     }
   }
 
+  // Validate, prune and patch an extracted engine in staging, move it into
+  // its own folder and make it the active one. Anything that fails leaves
+  // the current engine in place and removes the staging copy.
+  private async installPrepared(staging: string, version: string): Promise<void> {
+    try {
+      await preparePdfjsDir(staging);
+      await writeMeta(staging, version);
+      const name = `v${version}-${Date.now()}`;
+      await fs.mkdir(path.join(this.storageRoot, ENGINES_DIR), { recursive: true });
+      await fs.rename(staging, path.join(this.storageRoot, ENGINES_DIR, name));
+      await this.activate(name);
+    } finally {
+      await fs.rm(staging, { recursive: true, force: true });
+    }
+  }
+
   async resetToBundled(): Promise<void> {
-    await fs.rm(this.downloadedDir.fsPath, { recursive: true, force: true });
+    await this.activate(null);
   }
 
   private async installWithFeedback(version: string): Promise<void> {
     try {
       await this.install(version);
       await vscode.window.showInformationMessage(
-        `PDF Phoenix is now using pdf.js ${version}. Already-open PDFs keep the previous version until you close and reopen them.`
+        `PDF Phoenix is now using pdf.js ${version}. ${OPEN_PDFS_SWITCH}`
       );
     } catch (err) {
       await vscode.window.showErrorMessage(
@@ -174,19 +360,7 @@ export class PdfjsManager {
   // already current. Auto-update never crosses a major on its own.
   private async latestSameMajor(): Promise<string | null> {
     const info = await this.activeInfo();
-    const activeVersion = info.version ?? "0.0.0";
-    const major = parseVersion(activeVersion)?.[0];
-    if (major === undefined) {
-      return null;
-    }
-    const candidates = (await this.fetchReleases())
-      .filter((r) => !r.prerelease && parseVersion(r.version)?.[0] === major)
-      .sort((a, b) => compareVersions(b.version, a.version));
-    const latest = candidates[0]?.version;
-    if (!latest || compareVersions(latest, activeVersion) <= 0) {
-      return null;
-    }
-    return latest;
+    return pickUpdate(await this.fetchReleases(), info.version ?? "0.0.0");
   }
 
   // ---------- policies / commands ----------
@@ -310,21 +484,15 @@ export class PdfjsManager {
     if (picked.reset) {
       await this.resetToBundled();
       await vscode.window.showInformationMessage(
-        `PDF Phoenix is back to its built-in pdf.js (${bundledVersion ?? "unknown"}). Already-open PDFs keep the previous version until you close and reopen them.`
+        `PDF Phoenix is back to its built-in pdf.js (${bundledVersion ?? "unknown"}). ${OPEN_PDFS_SWITCH}`
       );
       return;
     }
 
     if (picked.version) {
-      const activeMajor = parseVersion(info.version ?? "0.0.0")?.[0];
-      const pickedMajor = parseVersion(picked.version)?.[0];
-      if (activeMajor !== undefined && pickedMajor !== undefined && pickedMajor !== activeMajor) {
-        const go = await vscode.window.showWarningMessage(
-          `pdf.js ${picked.version} is a newer major release (${pickedMajor}.x) than the one PDF Phoenix is tested with (${activeMajor}.x). ` +
-            `Annotation saving, the unsaved-changes indicator, or the print-key handling may not work correctly with it. Use it anyway?`,
-          { modal: true },
-          "Use It Anyway"
-        );
+      const warning = majorChangeWarning(picked.version, bundledVersion ?? info.version ?? "");
+      if (warning) {
+        const go = await vscode.window.showWarningMessage(warning, { modal: true }, "Use It Anyway");
         if (go !== "Use It Anyway") {
           return;
         }
@@ -334,14 +502,18 @@ export class PdfjsManager {
   }
 }
 
+export const OPEN_PDFS_SWITCH =
+  "Open PDFs switch to it now, or once you save or revert them if they have unsaved changes.";
+
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-async function pathExists(p: string): Promise<boolean> {
+// A usable engine folder: it has the viewer and the version marker.
+async function isValidEngine(dir: string): Promise<boolean> {
   try {
-    await fs.access(p);
-    return true;
+    await fs.access(path.join(dir, "web", "viewer.html"));
+    return (await readMetaVersion(dir)) !== null;
   } catch {
     return false;
   }

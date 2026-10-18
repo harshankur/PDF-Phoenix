@@ -9,3 +9,6 @@ tsconfig.json
 .git/**
 .github/**
 media/icon.svg
+out/test/**
+.vscode-test/**
+.claude/**

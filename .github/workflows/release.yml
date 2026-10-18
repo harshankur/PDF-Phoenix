@@ -8,8 +8,14 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # The Entra app releases publish as trusts only jobs running in this
+    # environment (its federated credential), so nothing else in the repo can
+    # sign in as the Marketplace publisher.
+    environment: marketplace
     permissions:
       contents: write
+      # To request the GitHub OIDC token that signs in to Entra ID.
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -28,9 +34,26 @@ jobs:
             exit 1
           fi
 
-      - run: npm run compile
+      # Compiles, then downloads the bundled pdf.js and verifies it against
+      # the SHA-256 digest GitHub publishes (read through GitHub's API).
+      - run: npm run fetch-assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Nothing reaches the Marketplace unless the tests pass, on the latest
+      # VS Code and on the oldest one the extension declares support for.
+      - run: npm run test:unit
+
+      - run: xvfb-run -a npm run test:integration
+
+      - name: Integration tests on the minimum supported VS Code
+        run: |
+          PDFPHOENIX_VSCODE_VERSION="$(node -p "require('./package.json').engines.vscode.replace(/^[^0-9]*/, '')")" \
+            xvfb-run -a npm run test:integration
 
       - run: npx vsce package
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -38,6 +61,23 @@ jobs:
           path: '*.vsix'
           if-no-files-found: error
 
+      # Sign in as the "PDF Phoenix publisher" Entra app with a short-lived
+      # OIDC token: no stored secret. (Marketplace personal access tokens have
+      # to be global ones, which Azure DevOps retires on December 1, 2026.)
+      # AZURE_CLIENT_ID and AZURE_TENANT_ID are repository variables, not
+      # secrets: on their own they grant nothing.
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      # Publishes the exact package built and tested above, as that app, which
+      # is a member of the "harshankur" Marketplace publisher.
+      - name: Publish to the Visual Studio Marketplace
+        run: npx vsce publish --azure-credential --packagePath "pdf-phoenix-${GITHUB_REF_NAME#v}.vsix"
+
+      # Only once the Marketplace has it, so the two never disagree.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

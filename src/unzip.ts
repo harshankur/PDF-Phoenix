@@ -8,6 +8,9 @@ import * as path from "node:path";
 // `tsc` with zero runtime dependencies to bundle.
 const EOCD_SIGNATURE = 0x06054b50;
 const CENTRAL_HEADER_SIGNATURE = 0x02014b50;
+const LOCAL_HEADER_SIGNATURE = 0x04034b50;
+// Sizes/offsets of 0xFFFFFFFF mean the real value is in a ZIP64 record.
+const ZIP64_MARKER = 0xffffffff;
 const STORED = 0;
 const DEFLATED = 8;
 
@@ -22,6 +25,7 @@ export async function unzipToDir(zip: Buffer, destDir: string): Promise<void> {
     }
     const method = zip.readUInt16LE(ptr + 10);
     const compressedSize = zip.readUInt32LE(ptr + 20);
+    const uncompressedSize = zip.readUInt32LE(ptr + 24);
     const nameLen = zip.readUInt16LE(ptr + 28);
     const extraLen = zip.readUInt16LE(ptr + 30);
     const commentLen = zip.readUInt16LE(ptr + 32);
@@ -29,6 +33,15 @@ export async function unzipToDir(zip: Buffer, destDir: string): Promise<void> {
     const name = zip.toString("utf8", ptr + 46, ptr + 46 + nameLen);
     ptr += 46 + nameLen + extraLen + commentLen;
 
+    if (compressedSize === ZIP64_MARKER || uncompressedSize === ZIP64_MARKER || localHeaderOffset === ZIP64_MARKER) {
+      throw new Error(`unzip: ZIP64 entries are not supported: ${name}`);
+    }
+
+    // ZIP entry names are always relative. An absolute or drive-letter name
+    // means a malformed or hostile archive, so refuse it rather than guess.
+    if (name.startsWith("/") || name.startsWith("\\") || /^[a-zA-Z]:/.test(name)) {
+      throw new Error(`unzip: absolute entry path not allowed: ${name}`);
+    }
     const outPath = path.join(destDir, name);
     if (!isInside(destDir, outPath)) {
       throw new Error(`unzip: entry escapes destination: ${name}`);
@@ -41,18 +54,29 @@ export async function unzipToDir(zip: Buffer, destDir: string): Promise<void> {
 
     // The local header's name/extra lengths can differ from the central
     // directory's, so re-read them to find where the file data actually starts.
+    if (localHeaderOffset + 30 > zip.length || zip.readUInt32LE(localHeaderOffset) !== LOCAL_HEADER_SIGNATURE) {
+      throw new Error(`unzip: malformed local header for ${name}`);
+    }
     const localNameLen = zip.readUInt16LE(localHeaderOffset + 26);
     const localExtraLen = zip.readUInt16LE(localHeaderOffset + 28);
     const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+    if (dataStart + compressedSize > zip.length) {
+      throw new Error(`unzip: truncated data for ${name}`);
+    }
     const raw = zip.subarray(dataStart, dataStart + compressedSize);
 
     let content: Buffer;
     if (method === STORED) {
       content = Buffer.from(raw);
     } else if (method === DEFLATED) {
-      content = zlib.inflateRawSync(raw);
+      // Cap the output at the declared size so a malformed or hostile
+      // archive can't expand into gigabytes (inflateRawSync throws past it).
+      content = zlib.inflateRawSync(raw, { maxOutputLength: Math.max(uncompressedSize, 1) });
     } else {
       throw new Error(`unzip: unsupported compression method ${method} for ${name}`);
+    }
+    if (content.length !== uncompressedSize) {
+      throw new Error(`unzip: size mismatch for ${name}`);
     }
 
     await fs.mkdir(path.dirname(outPath), { recursive: true });
@@ -73,5 +97,5 @@ function findEndOfCentralDirectory(zip: Buffer): number {
 
 function isInside(dir: string, target: string): boolean {
   const rel = path.relative(dir, target);
-  return rel.length > 0 && !rel.startsWith("..") && !path.isAbsolute(rel);
+  return rel.length > 0 && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
 }

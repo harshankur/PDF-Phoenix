@@ -1,124 +1,81 @@
-// Downloads Mozilla's prebuilt pdf.js viewer (not published on npm) and
-// extracts it into media/pdfjs/, giving us the exact build/+web/ layout
-// that viewer.html's relative asset paths expect.
-import { createWriteStream, existsSync, mkdtempSync, rmSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+// Downloads Mozilla's prebuilt pdf.js viewer (not published on npm) into
+// media/pdfjs/, giving us the exact build/+web/ layout that viewer.html's
+// relative asset paths expect.
+//
+// It goes through the same code the extension uses for pdf.js versions
+// downloaded at runtime (compiled into out/, so run `tsc` first; the
+// fetch-assets script does): the zip is checked against the SHA-256 digest
+// GitHub publishes for the release, extracted with the extension's own
+// unzipper, then validated, pruned and patched by preparePdfjsDir.
+import { existsSync } from "node:fs";
+import { mkdir, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { pipeline } from "node:stream/promises";
-import extract from "extract-zip";
 
-const VERSION = "6.1.200";
-const ZIP_NAME = `pdfjs-${VERSION}-dist.zip`;
-const DOWNLOAD_URL = `https://github.com/mozilla/pdf.js/releases/download/v${VERSION}/${ZIP_NAME}`;
+const require = createRequire(import.meta.url);
+const { checkDownload, findDistAsset, preparePdfjsDir, readMetaVersion, writeMeta } = require("../out/pdfjs.js");
+const { unzipToDir } = require("../out/unzip.js");
+
+const VERSION = "6.4.299";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const mediaDir = path.join(__dirname, "..", "media", "pdfjs");
 const viewerMarker = path.join(mediaDir, "web", "viewer.html");
 
-// Ships in Mozilla's release zip but is dev-only cruft we don't want
-// bloating the packaged extension: the demo PDF and the pdf.js debugger.
-const PRUNE_PATHS = [
-  path.join("web", "compressed.tracemonkey-pldi-09.pdf"),
-  path.join("web", "debugger.mjs"),
-  path.join("web", "debugger.mjs.map"),
-  path.join("web", "debugger.css"),
-];
-
-// pdf.js installs a global keydown handler that calls window.print() on
-// Ctrl/Cmd+P, and, because window.chrome/window.opera is truthy in
-// VS Code's Chromium webview, also on Ctrl/Cmd+Shift+P. That swallows
-// VS Code's Quick Open and Command Palette shortcuts and shows pdf.js's
-// "Preparing to print" overlay instead. Force the condition to false so
-// pdf.js never captures those keys; printing stays available from the
-// viewer toolbar. The unique trailing comment doubles as the "already
-// patched" marker (a bare "false" appears all over the file).
-// NOTE: keep PRUNE_PATHS/PATCHES in sync with src/pdfjs.ts, which applies
-// the identical preparation to copies downloaded at runtime.
-const PATCHES = [
-  {
-    file: path.join("web", "viewer.mjs"),
-    from: '(!event.shiftKey || window.chrome || window.opera)',
-    to: 'false /* pdf-phoenix: leave Ctrl/Cmd+P and Ctrl/Cmd+Shift+P to VS Code */',
-  },
-];
-
-// Version marker so the runtime updater can compare the bundled fallback
-// against downloaded copies. Keep the filename in sync with META_FILENAME
-// in src/pdfjs.ts.
-const META_FILENAME = "pdf-phoenix-meta.json";
+// GitHub's API allows few unauthenticated requests per hour, and CI runners
+// share addresses; use a token when one is provided.
+function githubHeaders() {
+  const headers = { "User-Agent": "PDF-Phoenix-build", Accept: "application/vnd.github+json" };
+  if (process.env.GITHUB_TOKEN) {
+    headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  }
+  return headers;
+}
 
 async function main() {
-  const cachedVersion = await readCachedVersion();
-  if (!existsSync(viewerMarker) || cachedVersion !== VERSION) {
+  if (!existsSync(viewerMarker) || (await readMetaVersion(mediaDir)) !== VERSION) {
     // Wipe rather than extract-over: bumping VERSION locally without
     // deleting media/pdfjs/ first would otherwise leave the old release's
     // files mixed in and still label the directory with the new version.
     await rm(mediaDir, { recursive: true, force: true });
     await mkdir(mediaDir, { recursive: true });
 
-    const tmpDir = mktempSafe();
-    const zipPath = path.join(tmpDir, ZIP_NAME);
-
-    console.log(`Downloading ${DOWNLOAD_URL} ...`);
-    const response = await fetch(DOWNLOAD_URL, { redirect: "follow" });
-    if (!response.ok || !response.body) {
-      throw new Error(`Failed to download ${DOWNLOAD_URL}: HTTP ${response.status}`);
+    const releaseUrl = `https://api.github.com/repos/mozilla/pdf.js/releases/tags/v${VERSION}`;
+    const releaseRes = await fetch(releaseUrl, { headers: githubHeaders() });
+    if (!releaseRes.ok) {
+      throw new Error(`Failed to read ${releaseUrl}: HTTP ${releaseRes.status}`);
     }
-    await pipeline(response.body, createWriteStream(zipPath));
+    const asset = findDistAsset(await releaseRes.json(), VERSION);
+    if (!asset) {
+      throw new Error(`pdf.js v${VERSION} has no viewer zip attached to its release.`);
+    }
+
+    console.log(`Downloading ${asset.url} ...`);
+    const zipRes = await fetch(asset.url, { redirect: "follow" });
+    if (!zipRes.ok) {
+      throw new Error(`Failed to download ${asset.url}: HTTP ${zipRes.status}`);
+    }
+    const zip = Buffer.from(await zipRes.arrayBuffer());
+
+    // The bundled copy ships to every user, so it must match Mozilla's
+    // published digest exactly; a size check alone isn't enough here.
+    if (checkDownload(zip, asset) !== "verified") {
+      throw new Error(`GitHub publishes no SHA-256 digest for ${asset.name}; refusing to bundle it unverified.`);
+    }
+    console.log(`Verified ${asset.name} against ${asset.digest}`);
 
     console.log(`Extracting into ${mediaDir} ...`);
-    await extract(zipPath, { dir: mediaDir });
-
-    rmSync(tmpDir, { recursive: true, force: true });
-
-    for (const relPath of PRUNE_PATHS) {
-      await rm(path.join(mediaDir, relPath), { force: true });
-    }
-
-    if (!existsSync(viewerMarker)) {
-      throw new Error(
-        `Extraction finished but ${viewerMarker} is missing. The pdf.js release layout may have changed.`
-      );
-    }
+    await unzipToDir(zip, mediaDir);
   } else {
     console.log(`pdf.js ${VERSION} viewer already present at ${mediaDir}, skipping download.`);
   }
 
-  for (const { file, from, to } of PATCHES) {
-    const filePath = path.join(mediaDir, file);
-    const content = await readFile(filePath, "utf8");
-    if (content.includes(from)) {
-      await writeFile(filePath, content.replace(from, to), "utf8");
-      console.log(`Patched ${file}`);
-    } else if (!content.includes(to)) {
-      throw new Error(
-        `Expected to find pattern in ${file} to patch (or evidence it was already patched), found neither. The pdf.js source may have changed.`
-      );
-    }
-  }
-
-  await writeFile(
-    path.join(mediaDir, META_FILENAME),
-    JSON.stringify({ version: VERSION }),
-    "utf8"
-  );
-
+  // Idempotent: validates the layout, prunes dev-only files and applies the
+  // print-shortcut patch (or confirms it's already applied).
+  await preparePdfjsDir(mediaDir);
+  await writeMeta(mediaDir, VERSION);
   console.log(`pdf.js ${VERSION} viewer ready at ${mediaDir}`);
-}
-
-function mktempSafe() {
-  return mkdtempSync(path.join(tmpdir(), "pdf-phoenix-pdfjs-"));
-}
-
-async function readCachedVersion() {
-  try {
-    const raw = await readFile(path.join(mediaDir, META_FILENAME), "utf8");
-    return JSON.parse(raw).version ?? null;
-  } catch {
-    return null;
-  }
 }
 
 main().catch((err) => {
