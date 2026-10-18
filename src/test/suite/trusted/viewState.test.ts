@@ -33,7 +33,9 @@ describe("Remembering where you left off", () => {
   });
 
   it("remembers each PDF separately", async () => {
-    await leaveAt(pdf, { page: 5 }, "page=5");
+    // Not the last page: pdf.js remembers the top-most visible page, and the
+    // last one can't scroll to the top when the window is taller than it.
+    await leaveAt(pdf, { page: 3 }, "page=3");
     const other = await openPdf(fixture("form-plain.pdf"));
     assert.strictEqual(other.page, 1);
     assert.strictEqual(other.scaleValue, "page-fit");
